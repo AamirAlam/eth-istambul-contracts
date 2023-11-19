@@ -6,7 +6,7 @@ const usdtPolygon = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F";
 
 async function main() {
   const owner = await ethers.getSigner();
-  const sleepSwapMasterChef = "0xD73624a0aaa1cc718Bea517A77868666B6082819"; // "0xBD4B78B3968922e8A53F1d845eB3a128Adc2aA12";
+  const sleepSwapMasterChef = "0x999b4AcC65b997454De2601Bb9d6BdC2B33238C5"; // "0xBD4B78B3968922e8A53F1d845eB3a128Adc2aA12";
   const token0 = usdtPolygon;
   const token1 = wmaticPolygon;
 
