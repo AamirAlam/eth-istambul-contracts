@@ -10,15 +10,16 @@ import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-
+import "@api3/airnode-protocol/contracts/rrp/requesters/RrpRequesterV0.sol";
+import "@api3/contracts/v0.8/interfaces/IProxy.sol";
 
 
 // Master contract for sleepSwap dex
-contract SleepSwapMasterAccumulation is Ownable {
+contract SleepSwapAccumulate is  RrpRequesterV0, Ownable {
     using SafeCast for int256;
     using SafeMath for uint256;
 
-    //manager: execute trx
+    //manager , who can run execute orders function for settlements
     address public manager;
 
 
@@ -38,10 +39,9 @@ contract SleepSwapMasterAccumulation is Ownable {
         address fromAddress;
         address toAddress;
         address user;
-        uint256 price;
+        uint256 price; // buy price for accumulation strategy
         uint256 amount;
         bool isBuy;
-        uint256 startAt; // block timestamp when this order become valid
         bool open;
         bool executed;
         string orderHash;
@@ -62,10 +62,19 @@ contract SleepSwapMasterAccumulation is Ownable {
    // user address -> position id
     mapping(address =>  uint256) public userPosition; // points to current user position
 
+    // mapping to show if user has an active position
+    mapping(address => uint16) public hasUserPositionActive;
+
     // swap initializations
     ISwapRouter public immutable swapRouter;
     // For this example, we will set the pool fee to 0.3%.
     uint24 public constant poolFee = 3000;
+
+    // airnode mappings
+    mapping(bytes32 => bool) public incomingFulfillments;
+    mapping(bytes32 => int256[]) public fulfilledData;
+
+    address public proxyAddress;
 
     //modifiers
     modifier onlyManager() {
@@ -91,7 +100,6 @@ contract SleepSwapMasterAccumulation is Ownable {
         address toToken,
         address user,
         uint256 price,
-        uint256 startAt,
         uint256 amount,
         bool isBuy,
         bool open,
@@ -116,10 +124,11 @@ contract SleepSwapMasterAccumulation is Ownable {
 
     // init contract
     constructor(
-        address _manager, ISwapRouter _swapRouter
-    ) {
+        address _manager, ISwapRouter _swapRouter, address _rrpAddress, address _proxyAddress
+    ) RrpRequesterV0(_rrpAddress)  {
         manager = _manager;
         swapRouter = _swapRouter;
+        proxyAddress = _proxyAddress;
     }
 
     function addManager(address _manager) public onlyOwner {
@@ -136,6 +145,11 @@ contract SleepSwapMasterAccumulation is Ownable {
         address _fromTokenAddress,
         address _toTokenAddress
     ) public {
+
+        // todo: add checks before deposits
+
+        // require( hasUserPositionActive[msg.sender] != 0 ,"one position is already active!" );
+
     
         // Transfer token0 to smart contract
         TransferHelper.safeTransferFrom(
@@ -145,68 +159,21 @@ contract SleepSwapMasterAccumulation is Ownable {
             _amount0
         );
 
-        // // transfer token1 to smart contract
-        // TransferHelper.safeTransferFrom(
-        //     _toTokenAddress,
-        //     msg.sender,
-        //     address(this),
-        //     _amount1
-        // );
-
         // update user balance after transfer
         userTokenBalances[msg.sender][_fromTokenAddress] += _amount0;
         // userTokenBalances[msg.sender][_toTokenAddress] += _amount1;
 
         // update token balances in contract
         tokenBalances[_fromTokenAddress] +=  _amount0;
-        // tokenBalances[_toTokenAddress] +=  _amount1;
+
 
 
         uint256 gridSize = _startTimes.length;
         uint256 token0ForEachBuyOrder = _amount0.div(gridSize);
-        // uint256 token1ForEachSellOrder = _amount1.div(gridSize);
 
         // start new position
         uint256 _positionId = ++positionsCount;
 
-
-        // // creating sell orderbooks
-        // for (uint256 i = 0; i < gridSize; i++) {
-           
-        //     uint256 _orderId = ++ordersCount;
-           
-        //     Order memory newOrder = Order({
-        //         orderId: _orderId,
-        //         fromAddress: _fromTokenAddress,
-        //         toAddress: _toTokenAddress,
-        //         user: msg.sender,
-        //         price: _sellPrices[i],
-        //         amount: token1ForEachSellOrder,
-        //         isBuy: false,
-        //         open: true,
-        //         executed: false,
-        //         orderHash: "0x" // add dummy string initially for order hash
-        //     });
-
-        //     orders[_orderId] = newOrder;
-
-        //     positionToOrders[_positionId].push(_orderId);
-        //     // userOrders[msg.sender].push(_orderId);
-
-        //     // emit event
-        //     emit OrderCreated(
-        //         newOrder.orderId,
-        //         newOrder.fromAddress,
-        //         newOrder.toAddress,
-        //         newOrder.user,
-        //         newOrder.price,
-        //         newOrder.amount,
-        //         newOrder.isBuy,
-        //         newOrder.open,
-        //         newOrder.executed,
-        //         newOrder.orderHash
-        //     );
-        // }
 
         for (uint256 i = 0; i < _startTimes.length; i++) {
 
@@ -218,7 +185,6 @@ contract SleepSwapMasterAccumulation is Ownable {
                 toAddress: _toTokenAddress,
                 user: msg.sender,
                 price: uint256(0),
-                startAt: _startTimes[i],
                 amount: token0ForEachBuyOrder,
                 isBuy: true,
                 open: true,
@@ -230,7 +196,6 @@ contract SleepSwapMasterAccumulation is Ownable {
 
             // add order to current position array
              positionToOrders[_positionId].push(_orderId);       
-            // userOrders[msg.sender].push(_orderId);
 
             emit OrderCreated(
                 newOrder.orderId,
@@ -238,7 +203,6 @@ contract SleepSwapMasterAccumulation is Ownable {
                 newOrder.toAddress,
                 newOrder.user,
                 newOrder.price,
-                newOrder.startAt,
                 newOrder.amount,
                 newOrder.isBuy,
                 newOrder.open,
@@ -264,7 +228,7 @@ contract SleepSwapMasterAccumulation is Ownable {
 
     // start startegy with existing user funds in contract
     function startStrategy(
-        uint256[] memory _startTimes,
+        uint256[] memory _prices,
         uint256 _amount0,
         uint256 _amount1,
         address _fromTokenAddress,
@@ -273,10 +237,11 @@ contract SleepSwapMasterAccumulation is Ownable {
     
 
         require( userTokenBalances[msg.sender][_fromTokenAddress] >= _amount0, "Insufficient token0 bal" );
+        // require( hasUserPositionActive[msg.sender] != 0 ,"one position is already active!" );
 
 
 
-        uint256 gridSize = _startTimes.length;
+        uint256 gridSize = _prices.length;
         uint256 token0ForEachBuyOrder = _amount0.div(gridSize);
     
 
@@ -285,7 +250,7 @@ contract SleepSwapMasterAccumulation is Ownable {
         uint256 _positionId = ++positionsCount;
 
  
-        for (uint256 i = 0; i < _startTimes.length; i++) {
+        for (uint256 i = 0; i < _prices.length; i++) {
 
              uint256 _orderId = ++ordersCount;
 
@@ -294,8 +259,7 @@ contract SleepSwapMasterAccumulation is Ownable {
                 fromAddress: _fromTokenAddress,
                 toAddress: _toTokenAddress,
                 user: msg.sender,
-                price: uint256(0),
-                startAt:_startTimes[i],
+                price: _prices[i],
                 amount: token0ForEachBuyOrder,
                 isBuy: true,
                 open: true,
@@ -306,7 +270,6 @@ contract SleepSwapMasterAccumulation is Ownable {
             orders[_orderId] = newOrder;
             
             positionToOrders[_positionId].push(_orderId);
-            // userOrders[msg.sender].push(_orderId);
 
             emit OrderCreated(
                 newOrder.orderId,
@@ -314,7 +277,6 @@ contract SleepSwapMasterAccumulation is Ownable {
                 newOrder.toAddress,
                 newOrder.user,
                 newOrder.price,
-                newOrder.startAt,
                 newOrder.amount,
                 newOrder.isBuy,
                 newOrder.open,
@@ -338,7 +300,32 @@ contract SleepSwapMasterAccumulation is Ownable {
         );
     }
 
+
+    function readDataFeed()
+                public
+                view
+                returns (int224 value, uint256 timestamp)
+            {
+                // Use the IProxy interface to read a dAPI via its
+                // proxy contract .
+                (value, timestamp) = IProxy(proxyAddress).read();
+                // If you have any assumptions about `value` and `timestamp`,
+                // make sure to validate them after reading from the proxy.
+            }
     
+
+        function swapTokenTest(uint256 _amountIn) public view returns (uint256, uint256 ) {
+
+            uint256 feeDeduction = _amountIn.mul(feePercent).div(10000);
+            // feeCollected += feeDeduction;
+            uint256 _amountInAfterFee = _amountIn - feeDeduction;
+            (int256 price, ) = readDataFeed();
+
+            // uint256 decimals = 30;
+
+            uint256 expectedOutputTokens = _amountInAfterFee.div(uint256(price)).mul(10^18).div(10^6).mul(10^18).mul(90).div(100);
+            return (expectedOutputTokens, uint256(price));
+        }
 
        function swapToken(
         uint256 _amountIn,
@@ -350,7 +337,12 @@ contract SleepSwapMasterAccumulation is Ownable {
         feeCollected += feeDeduction;
         uint256 _amountInAfterFee = _amountIn - feeDeduction;
 
-     
+        // (int256 price, ) = readDataFeed();
+
+        //output tokens must be  90% of current oracle price 
+        // expected output  = input.div(price).mul(18).div(inputDecimals).mul(outputDecimals).mul(90).div(100)      
+
+        // uint256 expectedOutputTokens = _amountInAfterFee.mul( uint256(price) ).div(10^6).mul(90).div(100);
 
         // Approve the router to spend USDT.
         TransferHelper.safeApprove(_fromToken, address(swapRouter), _amountInAfterFee);
@@ -378,12 +370,12 @@ contract SleepSwapMasterAccumulation is Ownable {
 
 
       // only manager
-    function executeOrders(uint256[] memory _orderIds) public onlyManager {
+    function executeOrders(int256[] memory _orderIds) public onlyManager {
         for (uint256 i = 0; i < _orderIds.length; i++) {
             require(_orderIds[i] > 0, "Order id must be greater than 0!");
-            Order storage selected_order = orders[_orderIds[i]];
+            Order storage selected_order = orders[uint256(_orderIds[i])];
             require(selected_order.open, "Order removed!");
-         
+
 
             // deduct tokens from pool    
             tokenBalances[selected_order.fromAddress] -= selected_order.amount;
@@ -464,10 +456,13 @@ contract SleepSwapMasterAccumulation is Ownable {
 
         uint256 _userPosition = userPosition[msg.sender];
 
+
+        // close orders and transfer funds to respective token mapping
         for(uint i = 0; i <  positionToOrders[_userPosition].length; i++){
 
             uint256 _orderId = positionToOrders[_userPosition][i];
             orders[_orderId].open = false;
+   
 
             emit CancelOrder(msg.sender,  _orderId , orders[_orderId].isBuy );
 
@@ -475,16 +470,14 @@ contract SleepSwapMasterAccumulation is Ownable {
 
     }
 
-    function userAvailableBalance(address _token) public view returns (uint256) {
+    function userAvailableBalance(address _user, address _token) public view returns (uint256) {
 
-
-        uint256 _userPosition = userPosition[msg.sender];
+        uint256 _userPosition = userPosition[_user];
 
         uint256[] memory _userOrderIds = positionToOrders[_userPosition];
 
         uint256 usedBalanceInOrders = 0;
-        // uint256 token_amount_to_return = 0;
-        //close existing open orders
+      
         for (uint256 i = 0; i < _userOrderIds.length; i++) {
 
             if(orders[ _userOrderIds[i] ].fromAddress  == _token && orders[ _userOrderIds[i] ].open ){
@@ -493,7 +486,9 @@ contract SleepSwapMasterAccumulation is Ownable {
            
         }
 
-        return  userTokenBalances[msg.sender][_token]-usedBalanceInOrders;
+
+        // return available balance to withdraw
+        return  userTokenBalances[_user][_token]-usedBalanceInOrders;
 
     }
 
@@ -501,22 +496,18 @@ contract SleepSwapMasterAccumulation is Ownable {
 
         uint256 _userPosition = userPosition[msg.sender];
 
-        uint256[] memory _userOrderIds = positionToOrders[_userPosition];
 
-        uint256 usedBalanceInOrders = 0;
-        // uint256 token_amount_to_return = 0;
-        //close existing open orders
-        for (uint256 i = 0; i < _userOrderIds.length; i++) {
-
-            if(orders[ _userOrderIds[i] ].fromAddress  == _token && orders[ _userOrderIds[i] ].open ){
-                usedBalanceInOrders += orders[ _userOrderIds[i] ].amount;
-            }
-           
-        }
-
-        require( _amount <= userTokenBalances[msg.sender][_token]-usedBalanceInOrders , "Insufficient balance to withdraw!");
+        uint256 availableBalance = userAvailableBalance(msg.sender, _token);
 
 
+        require( _amount <= availableBalance , "Insufficient balance to withdraw!");
+        require( _amount <= tokenBalances[_token] , "Contract does not have enough founds atm!");
+
+        // deduct withdrawn balance from user mapping
+        userTokenBalances[msg.sender][_token] -= _amount;
+
+        // deduct withdrawn balance from contract mapping
+        tokenBalances[_token] -= _amount;
 
         IERC20(_token).transfer(msg.sender, _amount);
 
@@ -528,5 +519,54 @@ contract SleepSwapMasterAccumulation is Ownable {
             _token,
             _amount
         );      
+    }
+
+
+    // ** API3 functions ** //
+
+     // To receive funds from the sponsor wallet and send them to the owner.
+    receive() external payable {
+        payable(owner()).transfer(address(this).balance);
+    }
+
+     // The main makeRequest function that will trigger the Airnode request.
+    function makeRequest(
+        address airnode,
+        bytes32 endpointId,
+        address sponsor,
+        address sponsorWallet,
+        bytes calldata parameters
+
+    ) external {
+        bytes32 requestId = airnodeRrp.makeFullRequest(
+            airnode,                        // airnode address
+            endpointId,                     // endpointId
+            sponsor,                        // sponsor's address
+            sponsorWallet,                  // sponsorWallet
+            address(this),                  // fulfillAddress
+            this.fulfill.selector,          // fulfillFunctionId
+            parameters                      // encoded API parameters
+        );
+        incomingFulfillments[requestId] = true;
+    }
+
+     function fulfill(bytes32 requestId, bytes calldata data)
+        external
+        onlyAirnodeRrp
+    {
+        require(incomingFulfillments[requestId], "No such request made");
+        delete incomingFulfillments[requestId];
+        int256[] memory decodedData = abi.decode(data, (int256[]));
+        fulfilledData[requestId] = decodedData;
+
+        // execute orderIds recieved here  
+        executeOrders(decodedData);
+
+
+    }
+
+    // To withdraw funds from the sponsor wallet to the contract.
+    function withdraw(address airnode, address sponsorWallet) external onlyOwner {
+        airnodeRrp.requestWithdrawal(airnode, sponsorWallet);
     }
 }
