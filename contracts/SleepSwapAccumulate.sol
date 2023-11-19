@@ -314,33 +314,34 @@ contract SleepSwapAccumulate is  RrpRequesterV0, Ownable {
             }
     
 
-        function swapTokenTest(uint256 _amountIn) public view returns (uint256, uint256 ) {
+  // retuns a positive value of percent change
+    function priceDeviationPercent(uint256 oldValue, uint256 newValue) public pure returns (uint256) {
+        require(oldValue > 0, "Old value must be greater than zero");
 
-            uint256 feeDeduction = _amountIn.mul(feePercent).div(10000);
-            // feeCollected += feeDeduction;
-            uint256 _amountInAfterFee = _amountIn - feeDeduction;
-            (int256 price, ) = readDataFeed();
+        // Calculate the percent change
+        uint256 percentChange =  newValue > oldValue ? (newValue) * 100 / (oldValue) - 100 : (oldValue) * 100 / (newValue) - 100;
 
-            // uint256 decimals = 30;
+        return percentChange;
+    }
 
-            uint256 expectedOutputTokens = _amountInAfterFee.div(uint256(price)).mul(10^18).div(10^6).mul(10^18).mul(90).div(100);
-            return (expectedOutputTokens, uint256(price));
-        }
 
        function swapToken(
         uint256 _amountIn,
         address _fromToken,
-        address _toToken
+        address _toToken,
+        uint256 _price
     ) internal returns (uint256 amountOut) {
         // Fee deduction
         uint256 feeDeduction = _amountIn.mul(feePercent).div(10000);
         feeCollected += feeDeduction;
         uint256 _amountInAfterFee = _amountIn - feeDeduction;
 
-        // (int256 price, ) = readDataFeed();
+        (int256 price, ) = readDataFeed();
 
-        //output tokens must be  90% of current oracle price 
-        // expected output  = input.div(price).mul(18).div(inputDecimals).mul(outputDecimals).mul(90).div(100)      
+        // current price must have less than 10% deviation from defined price in strategy
+        uint256  deviation =   priceDeviationPercent(_price , uint256(price));     
+
+        require(deviation < 20, "Price deviation is more than 10%" );         
 
         // uint256 expectedOutputTokens = _amountInAfterFee.mul( uint256(price) ).div(10^6).mul(90).div(100);
 
@@ -366,9 +367,6 @@ contract SleepSwapAccumulate is  RrpRequesterV0, Ownable {
     }
 
 
-
-
-
       // only manager
     function executeOrders(int256[] memory _orderIds) public onlyManager {
         for (uint256 i = 0; i < _orderIds.length; i++) {
@@ -390,7 +388,8 @@ contract SleepSwapAccumulate is  RrpRequesterV0, Ownable {
             uint256 token_received = swapToken(
                 selected_order.amount,
                 selected_order.fromAddress,
-                selected_order.toAddress
+                selected_order.toAddress,
+                selected_order.price
             );
 
             // update tokens recieved to order token balance

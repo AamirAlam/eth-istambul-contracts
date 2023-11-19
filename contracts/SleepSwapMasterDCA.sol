@@ -320,19 +320,6 @@ contract SleepSwapMasterDCA is  RrpRequesterV0, Ownable {
             }
     
 
-        function swapTokenTest(uint256 _amountIn) public view returns (uint256, uint256 ) {
-
-            uint256 feeDeduction = _amountIn.mul(feePercent).div(10000);
-            // feeCollected += feeDeduction;
-            uint256 _amountInAfterFee = _amountIn - feeDeduction;
-            (int256 price, ) = readDataFeed();
-
-            // uint256 decimals = 30;
-
-            uint256 expectedOutputTokens = _amountInAfterFee.div(uint256(price)).mul(10^18).div(10^6).mul(10^18).mul(90).div(100);
-            return (expectedOutputTokens, uint256(price));
-        }
-
        function swapToken(
         uint256 _amountIn,
         address _fromToken,
@@ -343,12 +330,12 @@ contract SleepSwapMasterDCA is  RrpRequesterV0, Ownable {
         feeCollected += feeDeduction;
         uint256 _amountInAfterFee = _amountIn - feeDeduction;
 
-        // (int256 price, ) = readDataFeed();
+        (int256 price, ) = readDataFeed();
 
         //output tokens must be  90% of current oracle price 
         // expected output  = input.div(price).mul(18).div(inputDecimals).mul(outputDecimals).mul(90).div(100)      
 
-        // uint256 expectedOutputTokens = _amountInAfterFee.mul( uint256(price) ).div(10^6).mul(90).div(100);
+        uint256 expectedOutputTokens = _amountInAfterFee.div(uint256(price)).mul(10^18).div(10^6).mul(10^18).mul(90).div(100);
 
         // Approve the router to spend USDT.
         TransferHelper.safeApprove(_fromToken, address(swapRouter), _amountInAfterFee);
@@ -363,15 +350,13 @@ contract SleepSwapMasterDCA is  RrpRequesterV0, Ownable {
                 recipient: address(this),
                 deadline: block.timestamp,
                 amountIn: _amountInAfterFee,
-                amountOutMinimum: 0,
+                amountOutMinimum: expectedOutputTokens,
                 sqrtPriceLimitX96: 0
             });
 
         // The call to exactInputSingle executes the swap.
         amountOut = ISwapRouter(swapRouter).exactInputSingle(params);
     }
-
-
 
 
 
